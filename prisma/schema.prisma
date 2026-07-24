@@ -1,0 +1,46 @@
+// Prisma schema —— 使用本地 SQLite 数据库（文件存放在 VPS 上，无需外部数据库服务）
+// 数据库文件路径由 .env 中的 DATABASE_URL 指定，例如 file:./dev.db
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+  columns      Column[]
+}
+
+model Column {
+  id        String   @id @default(cuid())
+  title     String
+  order     Int      @default(0)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  todos     Todo[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model Todo {
+  id        String   @id @default(cuid())
+  content   String
+  comment   String?
+  status    String   @default("normal") // important | normal | inProgress | completed
+  order     Int      @default(0)
+  columnId  String
+  column    Column   @relation(fields: [columnId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([columnId])
+}

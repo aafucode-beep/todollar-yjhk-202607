@@ -1,96 +1,66 @@
 # todollar - 智能待办事项管理器
 
-- [写在最前面：我什么都不会，有问题别怪我]
-- [已知问题：有时候加载页面不显示数据库内容，退出再登入即可，我自己能忍]
-
-一个功能强大的待办事项管理工具，支持分类、优先级和评论。适配PC和移动端。
+一个功能实用的待办事项管理工具，支持分类、状态和评论，适配 PC 和移动端。
 
 ## 功能特点
 
-- 用户认证（支持手机号/邮箱登录）
+- 用户认证（邮箱 + 密码，基于 NextAuth，服务端校验）
 - 创建多个待办事项列表
-- 支持4种待办事项状态（重要、普通、进行中、已完成）
+- 支持 4 种待办事项状态（重要、普通、进行中、已完成）
 - 待办事项评论功能
-- 响应式设计，支持PC和移动端
-- 数据存储在MongoDB Atlas
+- 响应式设计，支持 PC 和移动端
+- 数据存储在**本地 SQLite**，可完全自托管在自己的 VPS 上
 
 ## 技术栈
 
 - Next.js 14 (App Router)
 - TypeScript
-- MongoDB & Mongoose
-- NextAuth.js（认证）
+- SQLite + Prisma（本地数据库，无需外部服务）
+- NextAuth.js（认证，JWT 会话）
 - Tailwind CSS（样式）
-- Vercel（部署）
+- 部署：Node + PM2 + Nginx（自托管 VPS）
 
 ## 本地开发
 
-### 环境变量设置
+### 1. 配置环境变量
 
-创建`.env.local`文件并设置以下变量：
+复制 `.env.example` 为 `.env` 并填写：
 
 ```
-# MongoDB连接
-MONGODB_URI=mongodb+srv://your-username:your-password@clusterrvs.uvrdy.mongodb.net/calender/todugenius
-
-# NextAuth配置
-NEXTAUTH_URL=http://localhost:3000
-NEXTAUTH_SECRET=your-nextauth-secret
+DATABASE_URL="file:./prod.db"
+NEXTAUTH_URL="http://localhost:3000"
+NEXTAUTH_SECRET="用 openssl rand -base64 32 生成"
 ```
 
-### 安装依赖
+### 2. 安装依赖并初始化数据库
 
 ```bash
 npm install
+npm run db:push
 ```
 
-### 启动开发服务器
+### 3. 启动开发服务器
 
 ```bash
 npm run dev
 ```
 
-访问 http://localhost:3000 查看应用。
+访问 http://localhost:3000 ，先注册账号再登录使用。
 
-## 部署到Vercel
+## 部署到自己的 VPS
 
-1. 在Vercel上创建新项目
-2. 连接到GitHub存储库
-3. 设置环境变量（同上述`.env.local`中的内容）
-4. 部署应用
+详见 [DEPLOY.md](./DEPLOY.md)，包含上传到新 GitHub 账号、PM2 守护、Nginx 反代与 HTTPS、备份等完整步骤。
 
 ## 数据模型
 
-应用使用以下数据模型：
+数据存储在 SQLite（`prisma/schema.prisma` 定义），主要表：
 
-1. 待办事项面板（TodoBoard）
-   - 用户ID
-   - 列表集合
+1. `User` —— 用户（email、passwordHash）
+2. `Column` —— 待办列表（title、order，归属某个 user）
+3. `Todo` —— 待办事项（content、comment、status、order，归属某个 column）
 
-2. 待办事项列表（TodoColumn）
-   - 标题
-   - 排序顺序
-   - 待办事项集合
+## 安全说明
 
-3. 待办事项（Todo）
-   - 内容
-   - 状态（重要、普通、进行中、已完成）
-   - 评论
-   - 创建和更新时间
-
-## 使用帮助
-
-1. 登录系统（使用手机号或邮箱登录）
-2. 在主界面上，您可以：
-   - 创建新的列表
-   - 添加待办事项到列表中
-   - 设置待办事项的状态和添加评论
-   - 编辑和删除列表或待办事项
-3. 在移动端，使用顶部的标签切换不同的列表，或查看"全部"视图
-
-## 关于测试账号
-
-任意手机号或邮箱都可以登录，密码统一使用：password
-例如：
-- 手机号：13800138000，密码：password
-- 邮箱：test@example.com，密码：password
+- 认证由 NextAuth 统一处理，会话为签名后的 JWT，服务端接口通过 `getServerSession` 校验身份，用户只能访问自己的数据。
+- 密码使用 bcrypt 哈希存储。
+- 请务必设置强随机的 `NEXTAUTH_SECRET`，并在生产环境使用 HTTPS。

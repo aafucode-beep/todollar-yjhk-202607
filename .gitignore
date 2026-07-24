@@ -42,3 +42,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# database (SQLite) - 数据库文件不入库
+*.db
+*.db-journal
+/prisma/*.db
+/prisma/*.db-journal
+/data/

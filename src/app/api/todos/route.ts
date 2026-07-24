@@ -1,210 +1,137 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { cookies } from 'next/headers';
-import connectDB from '@/lib/mongodb';
-import TodoBoardModel, { ITodo, ITodoColumn, ITodoBoard } from '@/models/TodoList';
-import User from '@/models/User';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '@/lib/auth';
+import prisma from '@/lib/prisma';
+import type { ITodo, ITodoColumn } from '@/models/TodoList';
 
-// 添加锁定机制，避免并发处理同一个用户的请求
-const activeRequests = new Set<string>();
+// 允许的待办状态
+const VALID_STATUS = new Set(['important', 'normal', 'inProgress', 'completed']);
 
-// 获取用户会话信息
-async function getUserFromCookies(req: NextRequest) {
-  try {
-    // 获取用户信息
-    const cookieStore = cookies();
-    const userStr = cookieStore.get('user')?.value;
-    console.log('[API] 从Cookie获取用户:', userStr);
-    
-    if (!userStr) {
-      // 尝试从请求头中获取
-      const authHeader = req.headers.get('authorization');
-      console.log('[API] 尝试从请求头获取授权:', authHeader?.substring(0, 20) + '...');
-      
-      if (authHeader && authHeader.startsWith('Bearer ')) {
-        const token = authHeader.substring(7);
-        try {
-          const user = JSON.parse(Buffer.from(token, 'base64').toString());
-          console.log('[API] 从Bearer令牌解析出用户:', user);
-          return user;
-        } catch (e) {
-          console.error('[API] 解析Bearer令牌失败:', e);
-          return null;
-        }
-      }
-      
-      // 尝试从localStorage中获取（仅在客户端可用）
-      console.log('[API] 无法从Cookie或请求头获取用户信息');
-      return null;
-    }
-    
-    try {
-      const user = JSON.parse(userStr);
-      console.log('[API] 成功解析Cookie中的用户:', user);
-      return user;
-    } catch (e) {
-      console.error('[API] 解析Cookie中的用户失败:', e);
-      return null;
-    }
-  } catch (e) {
-    console.error('[API] 解析用户会话失败:', e);
-    return null;
-  }
+// 将数据库中的列/待办序列化为前端期望的结构（id -> _id）
+type ColumnWithTodos = {
+  id: string;
+  title: string;
+  order: number;
+  todos: {
+    id: string;
+    content: string;
+    comment: string | null;
+    status: string;
+    createdAt: Date;
+    updatedAt: Date;
+  }[];
+};
+
+function serializeBoard(userId: string, columns: ColumnWithTodos[]) {
+  return {
+    _id: userId,
+    userId,
+    columns: columns.map((col) => ({
+      _id: col.id,
+      title: col.title,
+      order: col.order,
+      todos: col.todos.map((todo) => ({
+        _id: todo.id,
+        content: todo.content,
+        comment: todo.comment ?? '',
+        status: todo.status,
+        createdAt: todo.createdAt,
+        updatedAt: todo.updatedAt,
+      })),
+    })),
+  };
+}
+
+async function loadColumns(userId: string): Promise<ColumnWithTodos[]> {
+  return prisma.column.findMany({
+    where: { userId },
+    orderBy: { order: 'asc' },
+    include: { todos: { orderBy: { order: 'asc' } } },
+  });
 }
 
 // 获取用户的所有待办事项
-export async function GET(req: NextRequest) {
+export async function GET() {
+  const session = await getServerSession(authOptions);
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: '未授权访问' }, { status: 401 });
+  }
+
+  const userId = session.user.id;
+
   try {
-    const user = await getUserFromCookies(req);
-    
-    if (!user?.id && !user?.email) {
-      return NextResponse.json({ error: '未授权访问' }, { status: 401 });
+    let columns = await loadColumns(userId);
+
+    // 首次访问时创建一个默认列表
+    if (columns.length === 0) {
+      await prisma.column.create({
+        data: { title: '待办事项', order: 0, userId },
+      });
+      columns = await loadColumns(userId);
     }
-    
-    const userId = user.id || user.email;
-    if (!userId) {
-        return NextResponse.json({ error: '无法确定用户标识符' }, { status: 401 });
-    }
-    
-    await connectDB();
-    
-    // 验证用户存在
-    const userExists = await User.findOne({ 
-      $or: [
-        { _id: user.id },
-        { email: user.email }
-      ]
-    });
-    
-    if (!userExists) {
-      return NextResponse.json({ error: '用户不存在' }, { status: 401 });
-    }
-    
-    let todoBoard = await TodoBoardModel.findOne({ userId });
-    
-    if (!todoBoard) {
-      try {
-        todoBoard = await TodoBoardModel.create({
-          userId,
-          columns: [
-            {
-              title: '待办事项',
-              todos: [],
-              order: 0
-            }
-          ]
-        });
-      } catch (createError: unknown) {
-        throw createError;
-      }
-    }
-    
-    return NextResponse.json(todoBoard, { status: 200 });
+
+    return NextResponse.json(serializeBoard(userId, columns), { status: 200 });
   } catch (error: unknown) {
-    return NextResponse.json({ error: '获取待办事项失败', details: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    return NextResponse.json(
+      { error: '获取待办事项失败', details: error instanceof Error ? error.message : String(error) },
+      { status: 500 }
+    );
   }
 }
 
-// 创建或更新待办事项面板
+// 创建或更新待办事项面板（整体替换该用户的列与待办）
 export async function POST(req: NextRequest) {
-  let userId: string | null | undefined = null;
-  
+  const session = await getServerSession(authOptions);
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: '未授权访问' }, { status: 401 });
+  }
+
+  const userId = session.user.id;
+
   try {
-    const user = await getUserFromCookies(req);
-    
-    if (!user?.id && !user?.email) {
-      return NextResponse.json({ error: '未授权访问' }, { status: 401 });
-    }
-    
-    userId = user.id || user.email;
-    if (!userId) {
-        return NextResponse.json({ error: '无法确定用户标识符' }, { status: 401 });
-    }
-    
-    if (activeRequests.has(userId)) {
-      return NextResponse.json({ message: '请求正在处理中，请稍后再试' }, { status: 429 });
-    }
-    
-    activeRequests.add(userId);
-    
-    await connectDB();
-    
-    // 验证用户存在
-    const userExists = await User.findOne({ 
-      $or: [
-        { _id: user.id },
-        { email: user.email }
-      ]
-    });
-    
-    if (!userExists) {
-      activeRequests.delete(userId);
-      return NextResponse.json({ error: '用户不存在' }, { status: 401 });
-    }
-    
     const data = await req.json();
-    
+
     if (!data.columns || !Array.isArray(data.columns)) {
-      activeRequests.delete(userId);
       return NextResponse.json({ error: '无效的数据格式' }, { status: 400 });
     }
-    
-    try {
-      const processedColumns = data.columns.map((column: Partial<ITodoColumn>) => {
-        const columnData: Partial<ITodoColumn> = {
-          title: column.title || '未命名列表',
-          order: typeof column.order === 'number' ? column.order : 0,
-        };
-        
-        if (column._id && typeof column._id === 'string' && column._id.match(/^[0-9a-fA-F]{24}$/)) {
-          columnData._id = column._id;
-        } else if (column._id) {
-          console.warn(`Invalid column._id found and ignored: ${column._id}`);
-        }
-        
-        if (Array.isArray(column.todos)) {
-          columnData.todos = column.todos.map((todo: Partial<ITodo>): ITodo => {
-            const todoData: Partial<ITodo> = {
-              content: todo.content || '',
-              status: todo.status || 'normal',
-              comment: todo.comment || '',
-              createdAt: todo.createdAt ? new Date(todo.createdAt) : new Date(),
-              updatedAt: todo.updatedAt ? new Date(todo.updatedAt) : new Date()
-            };
-            
-            if (todo._id && typeof todo._id === 'string' && todo._id.match(/^[0-9a-fA-F]{24}$/)) {
-              todoData._id = todo._id;
-            } else if (todo._id) {
-              console.warn(`Invalid todo._id found and ignored: ${todo._id}`);
-            }
-            
-            if (!todoData._id) {
-                // Don't set _id here, Mongoose/Mongo will generate one if needed on upsert/create
-            }
 
-            return todoData as ITodo;
-          });
-        } else {
-          columnData.todos = [];
-        }
-        
-        return columnData;
-      });
-      
-      const todoBoard = await TodoBoardModel.findOneAndUpdate(
-        { userId },
-        { userId, columns: processedColumns as ITodoColumn[] },
-        { new: true, upsert: true, setDefaultsOnInsert: true }
-      );
-      
-      return NextResponse.json(todoBoard, { status: 200 });
-    } catch (updateError: unknown) {
-      throw updateError;
-    }
+    // 规范化输入，防止非法字段写入
+    const columns = (data.columns as Partial<ITodoColumn>[]).map((column, colIndex) => ({
+      title: String(column.title ?? '未命名列表').slice(0, 200),
+      order: typeof column.order === 'number' ? column.order : colIndex,
+      todos: (Array.isArray(column.todos) ? column.todos : []).map(
+        (todo: Partial<ITodo>, todoIndex: number) => ({
+          content: String(todo.content ?? '').slice(0, 5000),
+          comment: todo.comment ? String(todo.comment).slice(0, 5000) : null,
+          status: todo.status && VALID_STATUS.has(todo.status) ? todo.status : 'normal',
+          order: todoIndex,
+          createdAt: todo.createdAt ? new Date(todo.createdAt) : new Date(),
+          updatedAt: todo.updatedAt ? new Date(todo.updatedAt) : new Date(),
+        })
+      ),
+    }));
+
+    // 在事务中整体替换：先删除该用户所有列（级联删除待办），再重新创建
+    await prisma.$transaction(async (tx) => {
+      await tx.column.deleteMany({ where: { userId } });
+      for (const column of columns) {
+        await tx.column.create({
+          data: {
+            title: column.title,
+            order: column.order,
+            userId,
+            todos: { create: column.todos },
+          },
+        });
+      }
+    });
+
+    const refreshed = await loadColumns(userId);
+    return NextResponse.json(serializeBoard(userId, refreshed), { status: 200 });
   } catch (error: unknown) {
-    return NextResponse.json({ error: '更新待办事项失败', details: error instanceof Error ? error.message : String(error) }, { status: 500 });
-  } finally {
-    if (userId) {
-      activeRequests.delete(userId);
-    }
+    return NextResponse.json(
+      { error: '更新待办事项失败', details: error instanceof Error ? error.message : String(error) },
+      { status: 500 }
+    );
   }
-} 
+}
